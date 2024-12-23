@@ -27,18 +27,6 @@ consteval std::meta::info reflect_optional_nested_type()
     }
 }
 
-// TODO: This works fine in the static_assert in main(), but not inside
-// of inject_iterator_interface().
-template<typename T>
-consteval bool has_member_function(std::string_view name)
-{
-    for (auto m : members_of(^^T)) {
-        if (is_function(m) && identifier_of(m) == name)
-            return true;
-    }
-    return false;
-}
-
 template<typename T>
 consteval std::meta::info make_pointer_type(
     std::meta::info initial_pointer_type, std::meta::info value_type)
@@ -65,8 +53,52 @@ struct stl_interface_access
     }
 };
 
+#if 0 // TODO
+enum class operator_kind {
+    dereference,        ///< \c *
+    pre_inc,            ///< \c ++
+    pre_dec,            ///< \c --
+    post_inc,           ///< \c ++(int)
+    post_dec,           ///< \c --(int)
+
+    plus,               ///< \c +
+    minus,              ///< \c -
+    less,               ///< \c <
+    greater,            ///< \c >
+    less_equal,         ///< \c <=
+    greater_equal,      ///< \c >=
+    equal_to,           ///< \c ==
+    not_equal_to,       ///< \c !=
+    spaceship,          ///< \c <=>
+
+    plus_assign,        ///< \c +=
+    minus_assign,       ///< \c -=
+    subscript,          ///< \c []
+};
+
+constexpr std::string_view user_member_names[] = {
+    "operator*",
+    "operator++",
+    "operator--",
+    "operator++(int)",
+    "operator--(int)",
+    "operator+",
+    "operator-",
+    "operator<",
+    "operator>",
+    "operator<=",
+    "operator>=",
+    "operator==",
+    "operator!=",
+    "operator<=>",
+    "operator+=",
+    "operator-=",
+    "operator[]"
+};
+#endif
+
 template<typename T>
-concept __uses_iter_iface = std::same_as<typename T::__iter_iface_tag, void>;
+consteval T make_constexpr();
 
 // TODO: there should probably be a proxy version of this too.
 template<typename T>
@@ -78,7 +110,12 @@ consteval void inject_iterator_interface() {
         stl_interface_access::base(t);
         stl_interface_access::base(ct);
     };
+    // TODO: add support for adaptation, or add a function that does adaptation.
+    static_assert(!adaptor, "This implementation does handle the iterator adaptation case.");
 
+    constexpr bool literal_type = requires { make_constexpr<T>(); };
+
+    // TODO: Adding constexpr here causes a failure when injecting below.
     std::meta::info t_i = ^^T;
 
     constexpr std::meta::info initial_value_type_i =
@@ -124,8 +161,6 @@ consteval void inject_iterator_interface() {
     queue_injection(^^{public:});
 #endif
 
-    queue_injection(^^{public: using __iter_iface_tag = void;});
-
     // TODO: These type alias declarations need public:, but cannot use it rn
     // due what seems to be a compiler bug.
 
@@ -159,18 +194,63 @@ consteval void inject_iterator_interface() {
     bool const input = ^^iterator_concept == ^^std::input_iterator_tag;
     bool const output = ^^iterator_concept == ^^std::output_iterator_tag;
 
-    // TODO: Check the availability of members if T that are required for each category above?
+    bool const pointer_is_void = pointer_type_i == ^^void;
 
     if (contiguous || random_access) {
+        if (!pointer_is_void && type_is_reference(reference_type_i)) {
+            queue_injection(^^{
+            public:
+                constexpr auto operator->(this auto&& self) {
+                    return detail::make_pointer<pointer, reference>(*self);
+                }
+            });
+        }
+
+        std::meta::list_builder constexpr_tok;
+        if (literal_type)
+            constexpr_tok += ^^{constexpr};
+
         queue_injection(^^{
-            public: [:\(t_i):] & operator++() {
-                *this += 1;
-                return *this;
+        public:
+            constexpr decltype(auto) operator[](this auto const& self, difference_type n) {
+                auto retval = self;
+                retval = retval + n;
+                return *retval;
             }
-            public: [:\(t_i):] operator++(int) {
-                auto tmp = *this;
-                ++*this;
-                return tmp;
+            constexpr decltype(auto) operator++(this auto& self) {
+                return self += difference_type(1);
+            }
+            constexpr auto operator++(this auto& self, int) {
+                auto retval = self;
+                ++self;
+                return retval;
+            }
+            constexpr decltype(auto) operator--(this auto& self) {
+                return self += -difference_type(1);
+            }
+            constexpr auto operator--(this auto& self, int) {
+                auto retval = self;
+                --self;
+                return retval;
+            }
+            constexpr decltype(auto) operator-=(this auto& self, difference_type n) {
+                return self += -n;
+            }
+            friend \tokens(constexpr_tok) auto operator+([:\(t_i):] it, difference_type n)
+            { return it += n; }
+            friend \tokens(constexpr_tok) auto operator+(difference_type n, [:\(t_i):] it)
+            { return it += n; }
+            friend \tokens(constexpr_tok) auto operator-([:\(t_i):] it, difference_type n)
+            { return it -= n; }
+            friend \tokens(constexpr_tok) auto operator<=>([:\(t_i):] lhs, [:\(t_i):] rhs) {
+                difference_type const diff = lhs - rhs;
+                return diff < difference_type(0) ? std::strong_ordering::less :
+                    difference_type(0) < diff ? std::strong_ordering::greater :
+                    std::strong_ordering::equal;
+            }
+            friend \tokens(constexpr_tok) auto operator==([:\(t_i):] lhs, [:\(t_i):] rhs) {
+                difference_type const diff = rhs - lhs;
+                return diff == difference_type(0);
             }
         });
     } else {
@@ -222,20 +302,32 @@ struct no_default_ctor {
     void func() {}
 };
 
+#define CHECK(expr) do {                                      \
+  if (!(expr)) std::cout << "FAILED check " << #expr << "\n"; \
+} while(false)
+
 int main()
 {
-    constexpr std::meta::info const_int_i = ^^const int;
-    constexpr std::meta::info int_i = type_remove_const(const_int_i);
-    typename[:int_i:] x = 42;
-    x = 13;
+    int ints[3] = {0, 1, 2};
+    basic_random_access_iter first(ints);
+    basic_random_access_iter last(ints + 3);
 
-    std::cout << x << "\n";
+    std::sort(first, last);
 
-    static_assert(has_member_function<no_default_ctor>("func"));
-    static_assert(!has_member_function<no_default_ctor>("funk"));
+    CHECK(first < last);
+    CHECK(first <= last);
+    CHECK(!(first > last));
+    CHECK(!(first >= last));
+    CHECK(!(first == last));
+    CHECK(first != last);
 
-#if 0
-    static_assert(is_constructible_type(^^basic_random_access_iter, {}));
-    static_assert(!is_constructible_type(^^no_default_ctor, {}));
-#endif
+    CHECK(first[0] == 0);
+    CHECK(first[1] == 1);
+    CHECK(first[2] == 2);
+
+    auto it = first;
+    ++it;
+    ++it;
+    ++it;
+    CHECK(it == last);
 }
