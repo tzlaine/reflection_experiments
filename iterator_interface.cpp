@@ -53,56 +53,17 @@ struct stl_interface_access
     }
 };
 
-#if 0 // TODO
-enum class operator_kind {
-    dereference,        ///< \c *
-    pre_inc,            ///< \c ++
-    pre_dec,            ///< \c --
-    post_inc,           ///< \c ++(int)
-    post_dec,           ///< \c --(int)
-
-    plus,               ///< \c +
-    minus,              ///< \c -
-    less,               ///< \c <
-    greater,            ///< \c >
-    less_equal,         ///< \c <=
-    greater_equal,      ///< \c >=
-    equal_to,           ///< \c ==
-    not_equal_to,       ///< \c !=
-    spaceship,          ///< \c <=>
-
-    plus_assign,        ///< \c +=
-    minus_assign,       ///< \c -=
-    subscript,          ///< \c []
-};
-
-constexpr std::string_view user_member_names[] = {
-    "operator*",
-    "operator++",
-    "operator--",
-    "operator++(int)",
-    "operator--(int)",
-    "operator+",
-    "operator-",
-    "operator<",
-    "operator>",
-    "operator<=",
-    "operator>=",
-    "operator==",
-    "operator!=",
-    "operator<=>",
-    "operator+=",
-    "operator-=",
-    "operator[]"
-};
-#endif
-
 template<typename T>
 consteval T make_constexpr();
 
 // TODO: there should probably be a proxy version of this too.
 template<typename T>
 consteval void inject_iterator_interface() {
+    // this should give us a reflection of the enclosing class, but there is currently
+    // a bug in EDG, so while it is intended to work - right now you
+    // have to pass T explicitly
+    // auto T = std::meta::nearest_class_or_namespace();
+
     static_assert(requires { typename T::iterator_concept; });
     static_assert(!requires { typename T::iterator_category; });
 
@@ -113,9 +74,7 @@ consteval void inject_iterator_interface() {
     // TODO: add support for adaptation, or add a function that does adaptation.
     static_assert(!adaptor, "This implementation does handle the iterator adaptation case.");
 
-    constexpr bool literal_type = requires { make_constexpr<T>(); };
-
-    // TODO: Adding constexpr here causes a failure when injecting below.
+    // TODO: (EDG) Adding constexpr here causes a failure when injecting below.
     std::meta::info t_i = ^^T;
 
     constexpr std::meta::info initial_value_type_i =
@@ -141,7 +100,7 @@ consteval void inject_iterator_interface() {
     constexpr std::meta::info reference_type_i =
         initial_reference_type_i == std::meta::info() ?
         type_add_lvalue_reference(initial_value_type_i) : initial_reference_type_i;
-#if 0 // TODO: Crashes EDG.
+#if 0 // TODO: (EDG) Crashes EDG.
     constexpr std::meta::info pointer_type_i =
         initial_pointer_type_i == std::meta::info() ?
         (^^T::iterator_concept == ^^std::output_iterator_tag ?
@@ -161,7 +120,7 @@ consteval void inject_iterator_interface() {
     queue_injection(^^{public:});
 #endif
 
-    // TODO: These type alias declarations need public:, but cannot use it rn
+    // TODO: (EDG) These type alias declarations need public:, but cannot use it rn
     // due what seems to be a compiler bug.
 
     // inject iterator_category
@@ -171,7 +130,7 @@ consteval void inject_iterator_interface() {
         } else if (^^T::iterator_concept == ^^std::contiguous_iterator_tag) {
             queue_injection(^^{using iterator_category = std::random_access_iterator_tag;});
         } else {
-            // TODO: Why can't I just write "= iterator_concept" below?
+            // TODO: (EDG) Why can't I just write "= iterator_concept" below?
             queue_injection(^^{using iterator_category = [:\(^^T::iterator_concept):];});
         }
     }
@@ -186,6 +145,7 @@ consteval void inject_iterator_interface() {
     if (initial_difference_type_i == std::meta::info())
         queue_injection(^^{public: using difference_type = [:\(difference_type_i):];});
 
+    // TODO: (EDG) Making these constexpr ICEs EDG.
     using iterator_concept = typename T::iterator_concept;
     bool const contiguous = ^^iterator_concept == ^^std::contiguous_iterator_tag;
     bool const random_access = ^^iterator_concept == ^^std::random_access_iterator_tag;
@@ -194,22 +154,58 @@ consteval void inject_iterator_interface() {
     bool const input = ^^iterator_concept == ^^std::input_iterator_tag;
     bool const output = ^^iterator_concept == ^^std::output_iterator_tag;
 
+#if 1 // TODO: Keep these?  Since the free function versions are uncheckable, maybe not?
+    assert(requires (T t) { *t; });
+    if (contiguous || random_access) {
+        assert(requires (T t, [:difference_type_i:] n) { t += n; });
+        // TODO: This fails for the free function version of op-.
+        // assert(requires (T t) { t - t; });
+    } else {
+        // TODO: Will fail if implemented as a free function.
+        // if (!output)
+        //     assert(requires (T t) { t == t; });
+        assert(requires (T t) { ++t; });
+        if (bidirectional)
+            assert(requires (T t) { --t; });
+    }
+#endif
+
     bool const pointer_is_void = pointer_type_i == ^^void;
 
-    if (contiguous || random_access) {
-        if (!pointer_is_void && type_is_reference(reference_type_i)) {
+    constexpr bool literal_type = requires { make_constexpr<T>(); };
+    std::meta::list_builder constexpr_tok;
+    if constexpr (literal_type)
+        constexpr_tok += ^^{constexpr};
+
+    if (!pointer_is_void && type_is_reference(reference_type_i)) {
+        queue_injection(^^{
+        public:
+            constexpr auto operator->(this auto&& self) {
+                return std::addressof(*self);
+            }
+        });
+    }
+
+    if (!(contiguous || random_access)) {
+        queue_injection(^^{
+            public:
+            constexpr auto operator++(this auto& self, int) {
+                auto retval = self;
+                ++self;
+                return retval;
+            }
+        });
+        if (bidirectional) {
             queue_injection(^^{
             public:
-                constexpr auto operator->(this auto&& self) {
-                    return detail::make_pointer<pointer, reference>(*self);
+                constexpr auto operator--(this auto& self, int) {
+                    auto retval = self;
+                    --self;
+                    return retval;
                 }
             });
         }
-
-        std::meta::list_builder constexpr_tok;
-        if (literal_type)
-            constexpr_tok += ^^{constexpr};
-
+    } else {
         queue_injection(^^{
         public:
             constexpr decltype(auto) operator[](this auto const& self, difference_type n) {
@@ -253,18 +249,31 @@ consteval void inject_iterator_interface() {
                 return diff == difference_type(0);
             }
         });
+#if 0
     } else {
-        // this should give us a reflection of the enclosing class, but there is currently
-        // a bug in EDG, so while it is intended to work - right now you
-        // have to pass T explicitly
-        // auto T = std::meta::nearest_class_or_namespace();
+        // TODO: (EDG) Putting these here breaks the build.  Note that they are
+        // identical to two of the injections above.  I put them at the top, and
+        // inverted the conditional expression, (it was originally "contiguous || random_access"),
+        // and used the contiguous/RA case as the else-case; that fixed things.
         queue_injection(^^{
-            public: [:\(t_i):] operator++(int) {
-                auto tmp = *this;
-                ++*this;
-                return tmp;
+            public:
+            constexpr auto operator++(this auto& self, int) {
+                auto retval = self;
+                ++self;
+                return retval;
             }
         });
+        if (bidirectional) {
+            queue_injection(^^{
+            public:
+                constexpr auto operator--(this auto& self, int) {
+                    auto retval = self;
+                    --self;
+                    return retval;
+                }
+            });
+        }
+#endif
     }
 }
 
@@ -282,7 +291,6 @@ struct basic_random_access_iter
         it_ += i;
         return *this;
     }
-    // TODO: Try it with member operator- too.
     friend std::ptrdiff_t operator-(
         basic_random_access_iter lhs, basic_random_access_iter rhs) noexcept
     {
@@ -313,6 +321,7 @@ int main()
     basic_random_access_iter last(ints + 3);
 
     std::sort(first, last);
+    std::ranges::sort(first, last);
 
     CHECK(first < last);
     CHECK(first <= last);
