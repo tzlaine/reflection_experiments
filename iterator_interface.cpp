@@ -1,3 +1,4 @@
+
 #include <cassert>
 #include <tuple>
 #include <experimental/meta>
@@ -58,7 +59,7 @@ consteval T make_constexpr();
 
 // TODO: there should probably be a proxy version of this too.
 template<typename T>
-consteval void inject_iterator_interface() {
+consteval void iterator_interface_inline() {
     // this should give us a reflection of the enclosing class, but there is currently
     // a bug in EDG, so while it is intended to work - right now you
     // have to pass T explicitly
@@ -254,7 +255,7 @@ consteval void inject_iterator_interface() {
         // TODO: (EDG) Putting these here breaks the build.  Note that they are
         // identical to two of the injections above.  I put them at the top, and
         // inverted the conditional expression, (it was originally "contiguous || random_access"),
-        // and used the contiguous/RA case as the else-case; that fixed things.
+        // and changed the contiguous/RA case to be the else-case; that fixed things.
         queue_injection(^^{
             public:
             constexpr auto operator++(this auto& self, int) {
@@ -275,6 +276,17 @@ consteval void inject_iterator_interface() {
         }
 #endif
     }
+
+#if 0 // TODO: If members_of() would return the members *so far*, I would
+      // be able to get the ctors from T, and repeat them for the const_
+      // version.
+    bool make_const_iter = true; // TODO: Provide a flag to disable this.
+    if (make_const_iter && type_is_reference(reference_type_i)) {
+        std::string_view mutable_name = identifier_of(t_i);
+        std::string const_name = "const_";
+        const_name.append(mutable_name);
+    }
+#endif
 }
 
 struct basic_random_access_iter
@@ -298,12 +310,41 @@ struct basic_random_access_iter
     }
 
     consteval {
-        inject_iterator_interface<basic_random_access_iter>();
+        iterator_interface_inline<basic_random_access_iter>();
+        // TODO: iterator_interface_inline();
     }
 
 private:
     int * it_;
 };
+
+#if 0 // TODO
+struct const_basic_random_access_iter
+{
+    using iterator_concept = std::random_access_iterator_tag;
+    using value_type = int;
+
+    const_basic_random_access_iter() {}
+    const_basic_random_access_iter(int * it) : it_(it) {}
+
+    const int & operator*() const { return *it_; }
+    const_basic_random_access_iter & operator+=(std::ptrdiff_t i)
+    {
+        it_ += i;
+        return *this;
+    }
+    friend std::ptrdiff_t operator-(
+        const_basic_random_access_iter lhs, const_basic_random_access_iter rhs) noexcept
+    {
+        return lhs.it_ - rhs.it_;
+    }
+
+    // Other members injected by iterator_interface_inline(); above.
+
+private:
+    basic_random_access_iter it_;
+};
+#endif
 
 struct no_default_ctor {
     explicit no_default_ctor(int) {}
