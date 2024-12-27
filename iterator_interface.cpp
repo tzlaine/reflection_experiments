@@ -1,4 +1,3 @@
-
 #include <cassert>
 #include <tuple>
 #include <experimental/meta>
@@ -38,6 +37,22 @@ consteval std::meta::info make_pointer_type(
         return ^^void;
     else
         return type_add_pointer(value_type);
+}
+
+template<typename T>
+consteval std::meta::info make_const_pointer_type(
+    std::meta::info initial_pointer_type, std::meta::info value_type)
+{
+    if (initial_pointer_type != std::meta::info()) {
+        if (!type_is_pointer(initial_pointer_type))
+            return initial_pointer_type;
+        else
+            return type_add_pointer(type_add_const(type_remove_pointer(initial_pointer_type)));
+    }
+    if (^^T::iterator_concept == ^^std::output_iterator_tag)
+        return ^^void;
+    else
+        return type_add_pointer(type_add_const(value_type));
 }
 
 struct stl_interface_access
@@ -344,6 +359,278 @@ struct const_basic_random_access_iter
 private:
     basic_random_access_iter it_;
 };
+#endif
+
+#if 0 // TODO: This is currently pretty unusable due to an EDG bug realted to
+      // list_builder concatenation.
+
+#if 0 // TODO: (EDG) A previous version of this function looked like this.  The
+      // line defining T produced the error, "error: expression must have a 
+      // constant value".  Is this correct, or is it a compiler bug?
+consteval void iterator_interface_from(std::meta::info t_i, std::string_view mutable_name)
+{
+    using T = typename[:t_i:];
+}
+#endif
+
+template<typename T>
+consteval void iterator_interface_from(std::string_view mutable_name)
+{
+    static_assert(requires { typename T::iterator_concept; });
+    static_assert(!requires { typename T::iterator_category; });
+
+    constexpr bool adaptor = requires (T t, T const ct) {
+        stl_interface_access::base(t);
+        stl_interface_access::base(ct);
+    };
+    // TODO: add support for adaptation, or add a function that does adaptation.
+    static_assert(!adaptor, "This implementation does handle the iterator adaptation case.");
+
+    using namespace std::literals;
+
+    // TODO: (EDG) Adding constexpr here causes a failure when injecting below.
+    std::meta::info t_i = ^^T;
+
+    std::meta::list_builder mutable_members;
+    std::meta::list_builder const_members;
+
+    constexpr std::meta::info initial_value_type_i =
+        reflect_optional_nested_type<T, get_value_type>();
+    constexpr std::meta::info initial_reference_type_i =
+        reflect_optional_nested_type<T, get_reference_type>();
+    constexpr std::meta::info initial_pointer_type_i =
+        reflect_optional_nested_type<T, get_pointer_type>();
+    constexpr std::meta::info initial_difference_type_i =
+        reflect_optional_nested_type<T, get_difference_type>();
+
+    static_assert(initial_value_type_i == std::meta::info() ||
+                  initial_value_type_i == type_remove_cv(initial_value_type_i),
+                  "T::value_type must not be const or volatile");
+
+    static_assert(initial_value_type_i != std::meta::info() ||
+                  initial_reference_type_i != std::meta::info(),
+                  "You must define at least one of T::value_type and T::reference_type");
+
+    constexpr std::meta::info value_type_i =
+        initial_value_type_i == std::meta::info() ?
+        type_remove_cvref(initial_reference_type_i) : initial_value_type_i;
+    constexpr std::meta::info reference_type_i =
+        initial_reference_type_i == std::meta::info() ?
+        type_add_lvalue_reference(initial_value_type_i) : initial_reference_type_i;
+    constexpr std::meta::info const_reference_type_i =
+        initial_reference_type_i == std::meta::info() ?
+        type_add_lvalue_reference(type_add_const(initial_value_type_i)) :
+        type_add_lvalue_reference(type_add_const(type_remove_reference(initial_reference_type_i)));
+    // Workaround; same semantics as the code above.
+    constexpr std::meta::info pointer_type_i =
+        make_pointer_type<T>(initial_pointer_type_i, value_type_i);
+    constexpr std::meta::info const_pointer_type_i =
+        make_const_pointer_type<T>(initial_pointer_type_i, value_type_i);
+    constexpr std::meta::info difference_type_i =
+        initial_reference_type_i == std::meta::info() ?
+        ^^std::ptrdiff_t : initial_difference_type_i;
+
+#if 0 // TODO
+    // open up public section
+    queue_injection(^^{public:});
+#endif
+
+    // TODO: (EDG) These type alias declarations need public:, but cannot use it rn
+    // due what seems to be a compiler bug.
+
+    // TODO: Changes these to add tokens to {mutable,const}_members, for
+    // injection into the two classes at the end.
+
+    bool const pointer_is_void = pointer_type_i == ^^void;
+    bool const make_const_iter = !pointer_is_void && type_is_reference(reference_type_i); // TODO: Provide a flag to disable this.
+
+    mutable_members += ^^{using iterator_concept = [:\(^^T::iterator_concept):];};
+    if (make_const_iter)
+        const_members += ^^{using iterator_concept = [:\(^^T::iterator_concept):];};
+
+#if 0
+    // inject iterator_category
+    if (^^T::iterator_concept != ^^std::input_iterator_tag) {
+        if (!type_is_reference(reference_type_i)) {
+            mutable_members += ^^{using iterator_category = std::input_iterator_tag;};
+        } else if (^^T::iterator_concept == ^^std::contiguous_iterator_tag) {
+            mutable_members += ^^{using iterator_category = std::random_access_iterator_tag;};
+            if (make_const_iter)
+                const_members += ^^{using iterator_category = std::random_access_iterator_tag;};
+        } else {
+            // TODO: (EDG) Why can't I just write "= iterator_concept" below?
+            mutable_members += ^^{using iterator_category = [:\(^^T::iterator_concept):];};
+            if (make_const_iter)
+                const_members += ^^{using iterator_category = [:\(^^T::iterator_concept):];};
+        }
+    }
+#else
+    // TODO: (EDG) This causes a build failure; the error is:
+    //  /opt/compiler-explorer/edg-gcc-13-experimental-reflection/base/include_cpp_exp/experimental/meta.stdh", line 443: error: expected a declaration
+    //  info tokens = ^{}, separator = ^{,};
+    //                                   ^.
+    mutable_members += ^^{using iterator_category = [:\(^^T::iterator_concept):];};
+#endif
+
+#if 0
+    // inject missing types
+    mutable_members += ^^{using value_type = [:\(value_type_i):];};
+    if (make_const_iter)
+        const_members += ^^{using value_type = [:\(value_type_i):];};
+    mutable_members += ^^{using reference = [:\(reference_type_i):];};
+    if (make_const_iter)
+        const_members += ^^{using reference = [:\(const_reference_type_i):];};
+    mutable_members += ^^{using pointer = [:\(pointer_type_i):];};
+    if (make_const_iter)
+        const_members += ^^{using pointer = [:\(const_pointer_type_i):];};
+    mutable_members += ^^{using difference_type = [:\(difference_type_i):];};
+    if (make_const_iter)
+        const_members += ^^{using difference_type = [:\(difference_type_i):];};
+#endif
+
+#if 0
+    // TODO: (EDG) Making these constexpr ICEs EDG.
+    using iterator_concept = typename T::iterator_concept;
+    bool const contiguous = ^^iterator_concept == ^^std::contiguous_iterator_tag;
+    bool const random_access = ^^iterator_concept == ^^std::random_access_iterator_tag;
+    bool const bidirectional = ^^iterator_concept == ^^std::bidirectional_iterator_tag;
+    bool const forward = ^^iterator_concept == ^^std::forward_iterator_tag;
+    bool const input = ^^iterator_concept == ^^std::input_iterator_tag;
+    bool const output = ^^iterator_concept == ^^std::output_iterator_tag;
+
+    assert(requires (T t) { *t; });
+    if (contiguous || random_access) {
+        assert(requires (T t, [:difference_type_i:] n) { t += n; });
+        assert(requires (T t) { t - t; });
+    } else {
+        if (!output)
+            assert(requires (T t) { t == t; });
+        assert(requires (T t) { ++t; });
+        if (bidirectional)
+            assert(requires (T t) { --t; });
+    }
+
+    constexpr bool literal_type = requires { make_constexpr<T>(); };
+    std::meta::list_builder constexpr_tok;
+    if constexpr (literal_type)
+        constexpr_tok += ^^{constexpr};
+
+    if (!pointer_is_void && type_is_reference(reference_type_i)) {
+        mutable_members += ^^{
+            constexpr auto operator->(this auto&& self) {
+                return std::addressof(*self);
+            }
+        };
+    }
+
+    if (!(contiguous || random_access)) {
+        mutable_members += ^^{
+            constexpr auto operator++(this auto& self, int) {
+                auto retval = self;
+                ++self;
+                return retval;
+            }
+        };
+        if (bidirectional) {
+            mutable_members += ^^{
+                constexpr auto operator--(this auto& self, int) {
+                    auto retval = self;
+                    --self;
+                    return retval;
+                }
+            };
+        }
+    } else {
+        mutable_members += ^^{
+            constexpr decltype(auto) operator[](this auto const& self, difference_type n) {
+                auto retval = self;
+                retval = retval + n;
+                return *retval;
+            }
+            constexpr decltype(auto) operator++(this auto& self) {
+                return self += difference_type(1);
+            }
+            constexpr auto operator++(this auto& self, int) {
+                auto retval = self;
+                ++self;
+                return retval;
+            }
+            constexpr decltype(auto) operator--(this auto& self) {
+                return self += -difference_type(1);
+            }
+            constexpr auto operator--(this auto& self, int) {
+                auto retval = self;
+                --self;
+                return retval;
+            }
+            constexpr decltype(auto) operator-=(this auto& self, difference_type n) {
+                return self += -n;
+            }
+            friend \tokens(constexpr_tok) auto operator+([:\(t_i):] it, difference_type n)
+            { return it += n; }
+            friend \tokens(constexpr_tok) auto operator+(difference_type n, [:\(t_i):] it)
+            { return it += n; }
+            friend \tokens(constexpr_tok) auto operator-([:\(t_i):] it, difference_type n)
+            { return it -= n; }
+            friend \tokens(constexpr_tok) auto operator<=>([:\(t_i):] lhs, [:\(t_i):] rhs) {
+                difference_type const diff = lhs - rhs;
+                return diff < difference_type(0) ? std::strong_ordering::less :
+                    difference_type(0) < diff ? std::strong_ordering::greater :
+                    std::strong_ordering::equal;
+            }
+            friend \tokens(constexpr_tok) auto operator==([:\(t_i):] lhs, [:\(t_i):] rhs) {
+                difference_type const diff = rhs - lhs;
+                return diff == difference_type(0);
+            }
+        };
+    }
+#endif
+
+    // TODO: Get the type name of T in there instead of hardcpding "impl".
+    queue_injection(^^{
+        struct \id(mutable_name) {
+            \tokens(mutable_members)
+        private:
+            impl impl_;
+        };
+    });
+    if (make_const_iter) {
+        queue_injection(^^{
+            struct \id("const_"sv, mutable_name) {
+                \tokens(const_members)
+            private:
+                impl impl_;
+            };
+        });
+    }
+}
+
+struct impl
+{
+    using iterator_concept = std::random_access_iterator_tag;
+    using value_type = int;
+
+    impl() {}
+    impl(int * it) : it_(it) {}
+
+    int & operator*() const { return *it_; }
+    impl & operator+=(std::ptrdiff_t i)
+    {
+        it_ += i;
+        return *this;
+    }
+    friend std::ptrdiff_t operator-(impl lhs, impl rhs) noexcept
+    {
+        return lhs.it_ - rhs.it_;
+    }
+
+private:
+    int * it_;
+};
+
+consteval {
+    iterator_interface_from<impl>("random_access_iter");
+}
 #endif
 
 struct no_default_ctor {
